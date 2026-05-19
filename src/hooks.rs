@@ -48,6 +48,45 @@ fn install_default_patterns(git_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+pub fn uninstall() -> Result<()> {
+    let git_dir = find_git_dir()?;
+    let hooks_dir = git_dir.join("hooks");
+
+    uninstall_hook(&hooks_dir.join("pre-commit"))?;
+    uninstall_hook(&hooks_dir.join("post-commit"))?;
+
+    println!("hooks removed");
+    Ok(())
+}
+
+fn uninstall_hook(hook_path: &Path) -> Result<()> {
+    if !hook_path.exists() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(hook_path)?;
+    let mut new_lines: Vec<&str> = Vec::new();
+    let mut skip_next = false;
+    for line in content.lines() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if line.starts_with("# free-my-agent:") {
+            skip_next = true;
+            continue;
+        }
+        new_lines.push(line);
+    }
+
+    let trimmed = new_lines.join("\n").trim_end().to_string();
+    if trimmed.is_empty() || trimmed == "#!/bin/sh" {
+        fs::remove_file(hook_path)?;
+    } else {
+        fs::write(hook_path, format!("{trimmed}\n"))?;
+    }
+    Ok(())
+}
+
 fn resolve_binary() -> Result<String> {
     let out = Command::new("which")
         .arg("free-my-agent")

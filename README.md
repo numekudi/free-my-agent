@@ -37,6 +37,7 @@ Usage: free-my-agent <COMMAND>
 
 Commands:
   init     Install git hooks into .git/hooks/
+  uninit   Remove git hooks installed by init
   add      Add a glob pattern to managed list (default: local to this repo)
   remove   Remove a glob pattern from managed list (default: local to this repo)
   list     List managed patterns

@@ -19,6 +19,8 @@ struct Cli {
 enum Cmd {
     /// Install git hooks into .git/hooks/
     Init,
+    /// Remove git hooks installed by init
+    Uninit,
     /// Add a glob pattern to managed list (default: local to this repo)
     Add {
         pattern: String,
@@ -47,6 +49,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Cmd::Init => hooks::install(),
+        Cmd::Uninit => hooks::uninstall(),
         Cmd::Add { pattern, global } => config::add_pattern(&pattern, global),
         Cmd::Remove { pattern, global } => config::remove_pattern(&pattern, global),
         Cmd::List => {
