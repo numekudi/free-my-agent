@@ -64,6 +64,9 @@ pub fn restore() -> Result<()> {
 
 fn copy_to(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
     if src.is_dir() {
+        if dst.exists() {
+            fs::remove_dir_all(dst)?;
+        }
         Command::new("cp")
             .args(["-r", &src.to_string_lossy(), &dst.to_string_lossy()])
             .status()
