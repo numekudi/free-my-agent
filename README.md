@@ -5,13 +5,13 @@
 ## インストール
 
 ```sh
-cargo install --git https://github.com/n/free-my-agent
+cargo install --git https://github.com/numekudi/free-my-agent
 ```
 
 または手元でビルド:
 
 ```sh
-git clone https://github.com/n/free-my-agent
+git clone https://github.com/numekudi/free-my-agent
 cd free-my-agent
 cargo install --path .
 ```
