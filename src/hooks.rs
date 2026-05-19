@@ -49,6 +49,8 @@ fn install_default_patterns(git_dir: &std::path::Path) -> Result<()> {
 }
 
 pub fn uninstall() -> Result<()> {
+    crate::ops::restore()?;
+
     let git_dir = find_git_dir()?;
     let hooks_dir = git_dir.join("hooks");
 
