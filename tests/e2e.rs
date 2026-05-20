@@ -59,6 +59,11 @@ impl TestRepo {
         ensure_success(output, &format!("free-my-agent {}", args.join(" ")))
     }
 
+    fn stdout_ok(&self, args: &[&str]) -> Result<String> {
+        let out = self.run_ok(args)?;
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
     fn git(&self, args: &[&str]) -> Result<Output> {
         Command::new("git")
             .args(args)
@@ -209,6 +214,117 @@ fn git_commit_hooks_restore_for_commit_and_hide_afterward() -> Result<()> {
         .context("git status output was not utf-8")?;
     assert!(status.contains(" D CLAUDE.md"));
     assert!(status.contains(" D .claude/settings.toml"));
+
+    Ok(())
+}
+
+#[test]
+fn status_shows_no_files_when_nothing_hidden() -> Result<()> {
+    let repo = TestRepo::new()?;
+    let out = repo.stdout_ok(&["status"])?;
+    assert!(out.contains("no files currently hidden"), "got: {out}");
+    Ok(())
+}
+
+#[test]
+fn free_reports_no_managed_files_when_no_patterns() -> Result<()> {
+    let repo = TestRepo::new()?;
+    let out = repo.stdout_ok(&["free"])?;
+    assert!(out.contains("no managed files found"), "got: {out}");
+    Ok(())
+}
+
+#[test]
+fn add_list_remove_pattern() -> Result<()> {
+    let repo = TestRepo::new()?;
+
+    let out = repo.stdout_ok(&["add", "CLAUDE.md"])?;
+    assert!(out.contains("added (local): CLAUDE.md"), "got: {out}");
+
+    let out = repo.stdout_ok(&["list"])?;
+    assert!(out.contains("CLAUDE.md"), "got: {out}");
+
+    let out = repo.stdout_ok(&["remove", "CLAUDE.md"])?;
+    assert!(out.contains("removed (local): CLAUDE.md"), "got: {out}");
+
+    let out = repo.stdout_ok(&["list"])?;
+    assert!(out.contains("no patterns registered"), "got: {out}");
+
+    Ok(())
+}
+
+#[test]
+fn status_shows_hidden_file_after_free() -> Result<()> {
+    let repo = TestRepo::new()?;
+    repo.write_file("CLAUDE.md", "agent instructions")?;
+    repo.run_ok(&["add", "CLAUDE.md"])?;
+    repo.run_ok(&["free"])?;
+
+    assert!(!repo.exists("CLAUDE.md"));
+
+    let out = repo.stdout_ok(&["status"])?;
+    assert!(out.contains("hidden: CLAUDE.md"), "got: {out}");
+
+    Ok(())
+}
+
+#[test]
+fn status_shows_nested_path_after_free() -> Result<()> {
+    let repo = TestRepo::new()?;
+    repo.write_file("sub/dir/CLAUDE.md", "nested agent file")?;
+    repo.run_ok(&["add", "sub/dir/CLAUDE.md"])?;
+    repo.run_ok(&["free"])?;
+
+    assert!(!repo.exists("sub/dir/CLAUDE.md"));
+
+    let out = repo.stdout_ok(&["status"])?;
+    assert!(
+        out.contains("sub/dir/CLAUDE.md") || out.contains("sub\\dir\\CLAUDE.md"),
+        "got: {out}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn same_filename_in_different_dirs_no_collision() -> Result<()> {
+    let repo = TestRepo::new()?;
+    repo.write_file("a/CLAUDE.md", "aaa")?;
+    repo.write_file("b/CLAUDE.md", "bbb")?;
+    repo.run_ok(&["add", "a/CLAUDE.md"])?;
+    repo.run_ok(&["add", "b/CLAUDE.md"])?;
+    repo.run_ok(&["free"])?;
+
+    assert!(!repo.exists("a/CLAUDE.md"));
+    assert!(!repo.exists("b/CLAUDE.md"));
+
+    let out = repo.stdout_ok(&["status"])?;
+    assert!(out.contains("a/CLAUDE.md"), "got: {out}");
+    assert!(out.contains("b/CLAUDE.md"), "got: {out}");
+
+    let backup = repo.backup_repo_dir()?;
+    assert_eq!(fs::read_to_string(backup.join("a/CLAUDE.md"))?, "aaa");
+    assert_eq!(fs::read_to_string(backup.join("b/CLAUDE.md"))?, "bbb");
+
+    Ok(())
+}
+
+#[test]
+fn status_clears_after_restore() -> Result<()> {
+    let repo = TestRepo::new()?;
+    repo.write_file("CLAUDE.md", "instructions")?;
+    repo.run_ok(&["add", "CLAUDE.md"])?;
+    repo.run_ok(&["free"])?;
+
+    assert!(!repo.exists("CLAUDE.md"));
+
+    repo.run_ok(&["restore"])?;
+
+    assert!(repo.exists("CLAUDE.md"));
+    assert_eq!(repo.read_file("CLAUDE.md")?, "instructions");
+
+    let out = repo.stdout_ok(&["status"])?;
+    assert!(out.contains("no files currently hidden"), "got: {out}");
 
     Ok(())
 }

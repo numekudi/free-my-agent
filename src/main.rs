@@ -4,6 +4,7 @@ mod ops;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use walkdir::WalkDir;
 
 #[derive(Parser)]
 #[command(
@@ -79,17 +80,14 @@ fn main() -> Result<()> {
         Cmd::Restore => ops::restore(),
         Cmd::Status => {
             let backup = config::backup_dir()?;
-            let entries = std::fs::read_dir(&backup)?;
             let mut found = false;
-            for entry in entries {
+            for entry in WalkDir::new(&backup).min_depth(1) {
                 let entry = entry?;
-                let path = entry.path();
-                let label = if path.is_dir() {
-                    "hidden (dir)"
-                } else {
-                    "hidden"
-                };
-                println!("{label}: {}", entry.file_name().to_string_lossy());
+                if entry.file_type().is_dir() {
+                    continue;
+                }
+                let rel = entry.path().strip_prefix(&backup).unwrap();
+                println!("hidden: {}", rel.display());
                 found = true;
             }
             if !found {
