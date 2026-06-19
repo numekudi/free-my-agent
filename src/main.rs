@@ -4,7 +4,6 @@ mod ops;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use walkdir::WalkDir;
 
 #[derive(Parser)]
 #[command(
@@ -78,22 +77,6 @@ fn main() -> Result<()> {
         }
         Cmd::Free => ops::free(),
         Cmd::Restore => ops::restore(),
-        Cmd::Status => {
-            let backup = config::backup_dir()?;
-            let mut found = false;
-            for entry in WalkDir::new(&backup).min_depth(1) {
-                let entry = entry?;
-                if entry.file_type().is_dir() {
-                    continue;
-                }
-                let rel = entry.path().strip_prefix(&backup).unwrap();
-                println!("hidden: {}", rel.display());
-                found = true;
-            }
-            if !found {
-                println!("no files currently hidden");
-            }
-            Ok(())
-        }
+        Cmd::Status => ops::status(),
     }
 }

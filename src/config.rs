@@ -1,17 +1,31 @@
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PatternScope {
+    Global,
+    Local,
+}
+
+impl PatternScope {
+    pub fn from_global_flag(global: bool) -> Self {
+        if global { Self::Global } else { Self::Local }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Local => "local",
+        }
+    }
+}
+
 pub fn repo_root() -> Result<PathBuf> {
-    let out = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .context("failed to run git")?;
-    anyhow::ensure!(out.status.success(), "not inside a git repository");
-    let path = String::from_utf8(out.stdout)?.trim().to_string();
-    Ok(PathBuf::from(path))
+    git_path(["rev-parse", "--show-toplevel"])
 }
 
 pub fn repo_id() -> Result<String> {
@@ -23,14 +37,16 @@ pub fn repo_id() -> Result<String> {
 }
 
 pub fn config_base() -> Result<PathBuf> {
-    let base = dirs_next();
+    let base = user_config_dir()?;
     fs::create_dir_all(&base)?;
     Ok(base)
 }
 
-fn dirs_next() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    PathBuf::from(home).join(".config").join("free-my-agent")
+fn user_config_dir() -> Result<PathBuf> {
+    // The CLI is user-scoped; a missing HOME is an environment error, not a
+    // condition to silently redirect into another user's config directory.
+    let home = std::env::var_os("HOME").context("HOME is not set")?;
+    Ok(PathBuf::from(home).join(".config").join("free-my-agent"))
 }
 
 pub fn backup_dir() -> Result<PathBuf> {
@@ -54,8 +70,12 @@ pub fn local_managed_file() -> Result<PathBuf> {
 }
 
 fn git_dir() -> Result<PathBuf> {
+    git_path(["rev-parse", "--git-dir"])
+}
+
+fn git_path<const N: usize>(args: [&str; N]) -> Result<PathBuf> {
     let out = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
+        .args(args)
         .output()
         .context("failed to run git")?;
     anyhow::ensure!(out.status.success(), "not inside a git repository");
@@ -63,7 +83,7 @@ fn git_dir() -> Result<PathBuf> {
     Ok(PathBuf::from(path))
 }
 
-fn parse_file(path: &PathBuf) -> Result<Vec<String>> {
+fn parse_file(path: &Path) -> Result<Vec<String>> {
     if !path.exists() {
         return Ok(vec![]);
     }
@@ -85,16 +105,15 @@ pub fn read_global_patterns() -> Result<Vec<String>> {
 }
 
 pub fn read_patterns() -> Result<Vec<String>> {
-    let mut patterns = read_global_patterns()?;
-    for p in read_local_patterns()? {
-        if !patterns.contains(&p) {
-            patterns.push(p);
-        }
-    }
-    Ok(patterns)
+    // BTreeSet gives deterministic output while removing duplicated patterns
+    // across local and global config files.
+    let mut patterns = BTreeSet::new();
+    patterns.extend(read_global_patterns()?);
+    patterns.extend(read_local_patterns()?);
+    Ok(patterns.into_iter().collect())
 }
 
-fn append_pattern(path: &PathBuf, pattern: &str) -> Result<()> {
+fn append_pattern(path: &Path, pattern: &str) -> Result<()> {
     let mut content = if path.exists() {
         fs::read_to_string(path)?
     } else {
@@ -110,28 +129,21 @@ fn append_pattern(path: &PathBuf, pattern: &str) -> Result<()> {
 }
 
 pub fn add_pattern(pattern: &str, global: bool) -> Result<()> {
-    let path = if global {
-        global_managed_file()?
-    } else {
-        local_managed_file()?
-    };
+    let scope = PatternScope::from_global_flag(global);
+    let path = managed_file(scope)?;
     let existing = parse_file(&path)?;
     if existing.iter().any(|p| p == pattern) {
         println!("already registered: {pattern}");
         return Ok(());
     }
     append_pattern(&path, pattern)?;
-    let scope = if global { "global" } else { "local" };
-    println!("added ({scope}): {pattern}");
+    println!("added ({}): {pattern}", scope.label());
     Ok(())
 }
 
 pub fn remove_pattern(pattern: &str, global: bool) -> Result<()> {
-    let path = if global {
-        global_managed_file()?
-    } else {
-        local_managed_file()?
-    };
+    let scope = PatternScope::from_global_flag(global);
+    let path = managed_file(scope)?;
     if !path.exists() {
         println!("pattern not found: {pattern}");
         return Ok(());
@@ -143,24 +155,32 @@ pub fn remove_pattern(pattern: &str, global: bool) -> Result<()> {
         .map(|l| format!("{l}\n"))
         .collect();
     fs::write(&path, new_content)?;
-    let scope = if global { "global" } else { "local" };
-    println!("removed ({scope}): {pattern}");
+    println!("removed ({}): {pattern}", scope.label());
     Ok(())
+}
+
+fn managed_file(scope: PatternScope) -> Result<PathBuf> {
+    match scope {
+        PatternScope::Global => global_managed_file(),
+        PatternScope::Local => local_managed_file(),
+    }
 }
 
 pub fn resolve_targets() -> Result<Vec<PathBuf>> {
     let root = repo_root()?;
     let patterns = read_patterns()?;
-    let mut targets = Vec::new();
+    let mut targets = BTreeSet::new();
     for pattern in &patterns {
         let full_pattern = root.join(pattern);
         let pattern_str = full_pattern.to_string_lossy();
-        for entry in glob::glob(&pattern_str).context("invalid glob pattern")? {
+        for entry in
+            glob::glob(&pattern_str).with_context(|| format!("invalid glob pattern: {pattern}"))?
+        {
             let path = entry?;
             if path.is_file() || path.is_dir() {
-                targets.push(path);
+                targets.insert(path);
             }
         }
     }
-    Ok(targets)
+    Ok(targets.into_iter().collect())
 }

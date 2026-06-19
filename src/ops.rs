@@ -1,10 +1,33 @@
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use walkdir::WalkDir;
 
 use crate::config::{backup_dir, repo_root, resolve_targets};
+
+struct BackupEntryMatcher {
+    patterns: Vec<glob::Pattern>,
+}
+
+impl BackupEntryMatcher {
+    fn new(patterns: &[String]) -> Result<Self> {
+        let patterns = patterns
+            .iter()
+            .map(|pattern| {
+                glob::Pattern::new(pattern)
+                    .with_context(|| format!("invalid glob pattern: {pattern}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Self { patterns })
+    }
+
+    fn matches(&self, path: &Path) -> bool {
+        self.patterns
+            .iter()
+            .any(|pattern| pattern.matches_path(path))
+    }
+}
 
 pub fn free() -> Result<()> {
     let backup = backup_dir()?;
@@ -17,13 +40,9 @@ pub fn free() -> Result<()> {
     for target in &targets {
         let rel = target
             .strip_prefix(&root)
-            .with_context(|| format!("{} is outside repo root", target.display()))?;
+            .with_context(|| format!("{} is outside {}", target.display(), root.display()))?;
         let dest = backup.join(rel);
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        copy_to(target, &dest)
-            .with_context(|| format!("failed to backup {}", target.display()))?;
+        copy_to(target, &dest).with_context(|| format!("failed to backup {}", target.display()))?;
         remove_path(target).with_context(|| format!("failed to remove {}", target.display()))?;
         println!("freed: {}", rel.display());
     }
@@ -34,60 +53,125 @@ pub fn restore() -> Result<()> {
     let backup = backup_dir()?;
     let root = repo_root()?;
     let patterns = crate::config::read_patterns()?;
+    let matcher = BackupEntryMatcher::new(&patterns)?;
 
-    for entry in WalkDir::new(&backup).min_depth(1) {
-        let entry = entry?;
-        if entry.file_type().is_dir() {
-            continue;
-        }
-        let src = entry.path();
-        let rel = src
-            .strip_prefix(&backup)
-            .context("backup path strip failed")?;
-        let rel_str = rel.to_string_lossy();
+    for rel in matching_backup_entries(&backup, &matcher)? {
+        let src = backup.join(&rel);
+        let dest = root.join(&rel);
+        copy_to(&src, &dest).with_context(|| format!("failed to restore {}", rel.display()))?;
+        remove_path(&src).with_context(|| format!("failed to clear backup {}", rel.display()))?;
 
-        // A pattern like `.claude` should restore all files inside `.claude/`
-        let matched = std::iter::once(rel).chain(rel.ancestors()).any(|ancestor| {
-            let s = ancestor.to_string_lossy();
-            patterns.iter().any(|p| {
-                glob::Pattern::new(p)
-                    .map(|pat| pat.matches(&s))
-                    .unwrap_or(false)
-            })
-        });
-        if !matched {
-            continue;
-        }
-
-        let dest = root.join(rel);
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        copy_to(src, &dest).with_context(|| format!("failed to restore {rel_str}"))?;
-        fs::remove_file(src)?;
-
-        Command::new("git")
+        let output = Command::new("git")
             .args(["add", &dest.to_string_lossy()])
             .current_dir(&root)
-            .status()
-            .with_context(|| format!("failed to git add {rel_str}"))?;
+            .output()
+            .with_context(|| format!("failed to git add {}", rel.display()))?;
+        anyhow::ensure!(
+            output.status.success(),
+            "git add failed for {}\nstdout:\n{}\nstderr:\n{}",
+            rel.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
 
-        println!("restored: {rel_str}");
+        println!("restored: {}", rel.display());
     }
+    Ok(())
+}
+
+pub fn status() -> Result<()> {
+    let backup = backup_dir()?;
+    let patterns = crate::config::read_patterns()?;
+    let matcher = BackupEntryMatcher::new(&patterns)?;
+    let entries = matching_backup_entries(&backup, &matcher)?;
+
+    if entries.is_empty() {
+        println!("no files currently hidden");
+        return Ok(());
+    }
+
+    for rel in entries {
+        let path = backup.join(&rel);
+        let label = if path.is_dir() {
+            "hidden (dir)"
+        } else {
+            "hidden"
+        };
+        println!("{label}: {}", rel.display());
+    }
+
+    Ok(())
+}
+
+fn matching_backup_entries(backup: &Path, matcher: &BackupEntryMatcher) -> Result<Vec<PathBuf>> {
+    let mut entries = Vec::new();
+    collect_matching_backup_entries(backup, backup, matcher, &mut entries)?;
+    entries.sort();
+    Ok(entries)
+}
+
+fn collect_matching_backup_entries(
+    backup: &Path,
+    dir: &Path,
+    matcher: &BackupEntryMatcher,
+    entries: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(backup)
+            .with_context(|| format!("{} is outside {}", path.display(), backup.display()))?
+            .to_path_buf();
+
+        if matcher.matches(&rel) {
+            entries.push(rel);
+            continue;
+        }
+
+        if path.is_dir() {
+            collect_matching_backup_entries(backup, &path, matcher, entries)?;
+        }
+    }
+
     Ok(())
 }
 
 fn copy_to(src: &Path, dst: &Path) -> Result<()> {
     if src.is_dir() {
         if dst.exists() {
+            remove_path(dst)?;
+        }
+        copy_dir(src, dst)?;
+    } else {
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if dst.is_dir() {
             fs::remove_dir_all(dst)?;
         }
-        Command::new("cp")
-            .args(["-r", &src.to_string_lossy(), &dst.to_string_lossy()])
-            .status()
-            .context("cp -r failed")?;
-    } else {
         fs::copy(src, dst)?;
+    }
+    Ok(())
+}
+
+fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
+    // Preserve directory structure exactly so restore can rehydrate paths from
+    // the backup root without flattening nested glob matches.
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let dest = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir(&path, &dest)?;
+        } else {
+            fs::copy(&path, &dest)?;
+        }
     }
     Ok(())
 }

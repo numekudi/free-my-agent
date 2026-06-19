@@ -95,6 +95,11 @@ impl TestRepo {
     fn exists(&self, rel: &str) -> bool {
         self.path().join(rel).exists()
     }
+
+    fn write_managed_patterns(&self, content: &str) -> Result<()> {
+        let path = self.git_dir().join("free-my-agent");
+        fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))
+    }
 }
 
 fn ensure_success(output: Output, command: &str) -> Result<Output> {
@@ -157,6 +162,47 @@ fn free_and_restore_round_trip_managed_files() -> Result<()> {
         repo.read_file(".claude/settings.toml")?,
         "model = \"sonnet\"\n"
     );
+
+    Ok(())
+}
+
+#[test]
+fn nested_glob_targets_restore_to_original_path() -> Result<()> {
+    let repo = TestRepo::new()?;
+    repo.write_file(".github/prompts/review.md", "review prompt\n")?;
+
+    repo.run_ok(&["init"])?;
+    repo.run_ok(&["free"])?;
+
+    assert!(!repo.exists(".github/prompts/review.md"));
+
+    let status = String::from_utf8(repo.run_ok(&["status"])?.stdout)
+        .context("status output was not utf-8")?;
+    assert!(status.contains("hidden: .github/prompts/review.md"));
+
+    repo.run_ok(&["restore"])?;
+
+    assert_eq!(
+        repo.read_file(".github/prompts/review.md")?,
+        "review prompt\n"
+    );
+    assert!(!repo.exists("review.md"));
+
+    Ok(())
+}
+
+#[test]
+fn invalid_managed_glob_returns_an_error() -> Result<()> {
+    let repo = TestRepo::new()?;
+
+    repo.run_ok(&["init"])?;
+    repo.write_managed_patterns("[\n")?;
+
+    let output = repo.run(&["status"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).context("stderr output was not utf-8")?;
+    assert!(stderr.contains("invalid glob pattern"));
 
     Ok(())
 }
