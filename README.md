@@ -64,7 +64,7 @@ CLAUDE.md
 AGENTS.md
 .claude
 .gemini
-.agent
+.agents
 .github/copilot-instructions.md
 .github/instructions/*
 .github/prompts/*
